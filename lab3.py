@@ -4,9 +4,9 @@ import HAL
 import cv2 as cv
 import time
 
-kP = 6.35e-3
-kD = 6e-4
-kI = 9e-5
+kP = 6.7e-3
+kD = 6.5e-4
+kI = 6.5e-4
 
 tLast = time.time()
 tCurr = time.time()
@@ -16,11 +16,14 @@ windup_limit = 1000  # high so it does not apply right now
 
 eLast = 0.0
 
-spSpeed = 10
+spSpeed = 4
 
 while True:
     ## CALCULATE ERROR:
-    img = HAL.getImage()
+    img = HAL.getImage()[230:-110, :, :] 
+    # setting a roi on the captured image so the centroid is 
+    # calculated with more anticipation, potentially some 
+    # corner cutting and the cycle time is lower
     img_mask = cv.inRange(
         cv.cvtColor(img, cv.COLOR_BGR2HSV), (0, 125, 125), (30, 255, 255)
     )
@@ -56,10 +59,10 @@ while True:
         _i += kI * e * Dt
 
         # anti-windup
-        if _i > windup_limit:
-            _i = windup_limit
-        if _i < -windup_limit:
-            _i = -windup_limit
+        # if _i > windup_limit:
+        #     _i = windup_limit
+        # if _i < -windup_limit:
+        #     _i = -windup_limit
 
         ## UPDATE CYCLE VARIABLES:
         eLast = e
@@ -67,7 +70,7 @@ while True:
 
         ## CALCULATE NEW TURN
         setW = _p + _d + _i
-        print(f"Setw = {_p} + {_d} + {_i} = {setW}")
+        #print(f"Setw = {_p} + {_d} + {_i} = {setW}")
 
         HAL.setV(spSpeed)
         HAL.setW(setW)
