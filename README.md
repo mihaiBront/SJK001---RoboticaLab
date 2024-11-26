@@ -9,3 +9,6 @@
 
 ## LAB 3:
 - Proportional Integrative and Derivative control (PID) with antiwindup (not used atm)
+
+## LAB 4:
+- Drone takeoff and navigate to people
