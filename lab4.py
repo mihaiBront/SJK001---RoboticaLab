@@ -3,6 +3,11 @@ import HAL as Drone
 import utm
 
 import numpy as np
+import cv2
+
+haar_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
 
 # known safety boat location, stored as DEG,MIN,SEC
 BOAT_GEO_LAT_LONG = np.array([[40, 16, 48.2], [-3, -49, -03.5]])
@@ -30,10 +35,27 @@ current_pos = Drone.get_position()
 print(f"current_pos = {current_pos}, survivors from here = {SURVIVORS_FROM_DRONE}")
 
 Drone.takeoff(3)
+desiredPosition = SURVIVORS_FROM_DRONE
 
 while True:
-    GUI.showImage(Drone.get_frontal_image())
-    GUI.showLeftImage(Drone.get_ventral_image())
+    drone_position = Drone.get_position()
+    distance_to_position = SURVIVORS_FROM_DRONE[:2] - drone_position[:2]
+    distance_to_position = np.sqrt(np.sum(distance_to_position**2))
 
-    Drone.set_cmd_pos(SURVIVORS_FROM_DRONE[0], SURVIVORS_FROM_DRONE[1], 3, 0.6)
-    print(current_pos)
+    if distance_to_position < 2:
+        print("drone should stop")
+
+    ventralImg = Drone.get_ventral_image()
+    ventralImg_gray = cv2.cvtColor(ventralImg, cv2.COLOR_BGR2GRAY)
+
+    faces_rect = haar_cascade.detectMultiScale(ventralImg_gray, 1.1, 9)
+
+    if len(faces_rect) > 0:
+        print("----------------FACES DETECTED----------------")
+        for x, y, w, h in faces_rect:
+            print("Face detected! (pos: {drone_position}); imCoords: {(x,y)}")
+            cv2.rectangle(ventralImg, (x, y), (x + w, y + h), (0, 255, 0), thickness=2)
+
+    GUI.showImage(Drone.get_frontal_image())
+    GUI.showLeftImage(ventralImg)
+    Drone.set_cmd_pos(desiredPosition[0], desiredPosition[1], 5, 0.9)
