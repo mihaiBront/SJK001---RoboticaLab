@@ -4,15 +4,74 @@ import utm
 
 import numpy as np
 import cv2
+import random
 
-haar_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-)
+#------------------
+#    FUNCTIONS
+#------------------
 
-# known safety boat location, stored as DEG,MIN,SEC
-BOAT_GEO_LAT_LONG = np.array([[40, 16, 48.2], [-3, -49, -03.5]])
-SURVIVORS_GEO_LAT_LONG = np.array([[40, 16, 47.23], [-3, -49, -01.78]])
+def rotate_image(image, angle):
+    if angle == 0: return image
+    height, width = image.shape[:2]
+    rot_mat = cv2.getRotationMatrix2D((width/2, height/2), angle, 0.9)
+    result = cv2.warpAffine(image, rot_mat, (width, height), flags=cv2.INTER_LINEAR)
+    return result
 
+def detect_faces(image_gray):
+    faces_rect = []
+
+    for angle in np.linspace(0, 359, 5):
+        image_rot = rotate_image(image_gray, angle)
+
+        faces_rect = haar_cascade.detectMultiScale(image_rot, 1.1, 9)
+
+        if len(faces_rect) > 0:
+            for x, y, w, h in faces_rect:
+                image_rot = cv2.rectangle(image_rot, (x, y), (x + w, y + h), (0, 255, 0), thickness=2)
+                image_gray = rotate_image(image_rot, -angle)
+            break
+    
+    return faces_rect
+
+
+def random_point_in_circle(radius, centroid):
+    # random angle
+    alpha = 2 * np.pi * random.random()
+
+    # random radius
+    r = radius * np.sqrt(random.random())
+
+    # calculating coordinates
+    x = r * np.cos(alpha) + centroid[0]
+    y = r * np.sin(alpha) + centroid[1]
+
+    return [x, y]
+
+def navigation(current_position, setpoint_position, freeroam_radius):
+    # calculate distance to survivors position
+    distance_to_position = setpoint_position - current_position
+    distance_to_position = np.sqrt(np.sum(distance_to_position**2))
+
+    if distance_to_position < freeroam_radius: 
+        #navigate towards survivors position
+        Drone.set_cmd_pos(setpoint_position[0], setpoint_position[1], DRONE_HEIGHT, 0.6)
+    else:
+        #freeroam in a circle around the survivors position
+        
+        # set the set_point position if it is still undeclared
+        if FREEROAM_SET_POINT_POSITION is None:
+            FREEROAM_SET_POINT_POSITION = setpoint_position
+        
+        # calculate distance from drone to position
+        distance_to_freeroam_center = FREEROAM_SET_POINT_POSITION - current_position
+        distance_to_freeroam_center = np.sqrt(np.sum(distance_to_position**2))
+
+        # if close to randomly selected point
+        if distance_to_freeroam_center < 0.75: #meters
+            FREEROAM_SET_POINT_POSITION = random_point_in_circle(freeroam_radius, setpoint_position)
+        
+        Drone.set_cmd_pos(FREEROAM_SET_POINT_POSITION[0], FREEROAM_SET_POINT_POSITION[1], DRONE_HEIGHT, 0.6)
+    
 
 def geoToCartesian(geo):
     _cart = geo.copy()
@@ -25,6 +84,26 @@ def geoToCartesian(geo):
     return np.array(list(utm.from_latlon(_cart[0], _cart[1]))[0:2])
 
 
+#------------------------------------------
+#    VARIABLES AND INITIAL DECLARATIONS
+#------------------------------------------
+
+haar_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+)
+
+#variables for navigation
+DRONE_HEIGHT = 5
+
+#variables for free_roam
+FREEROAM_SET_POINT_POSITION: list[float] | None = None
+
+
+# known safety boat location, stored as DEG,MIN,SEC
+BOAT_GEO_LAT_LONG = np.array([[40, 16, 48.2], [-3, -49, -03.5]])
+SURVIVORS_GEO_LAT_LONG = np.array([[40, 16, 47.23], [-3, -49, -01.78]])
+
+
 BOAT_GEO_CART = geoToCartesian(BOAT_GEO_LAT_LONG)
 SURVIVORS_GEO_CART = geoToCartesian(SURVIVORS_GEO_LAT_LONG)
 
@@ -34,28 +113,23 @@ current_pos = Drone.get_position()
 
 print(f"current_pos = {current_pos}, survivors from here = {SURVIVORS_FROM_DRONE}")
 
+#-------------------
+#    SETUP CODE
+#-------------------
+
 Drone.takeoff(3)
 desiredPosition = SURVIVORS_FROM_DRONE
 
 while True:
     drone_position = Drone.get_position()
-    distance_to_position = SURVIVORS_FROM_DRONE[:2] - drone_position[:2]
-    distance_to_position = np.sqrt(np.sum(distance_to_position**2))
+    
+    navigation(drone_position[:2], SURVIVORS_FROM_DRONE[:2], 5)         
 
-    if distance_to_position < 2:
-        print("drone should stop")
+    ventralImg = cv2.cvtColor(Drone.get_ventral_image(), cv2.COLOR_BGR2GRAY)
+    faces_list = detect_faces(ventralImg)
 
-    ventralImg = Drone.get_ventral_image()
-    ventralImg_gray = cv2.cvtColor(ventralImg, cv2.COLOR_BGR2GRAY)
-
-    faces_rect = haar_cascade.detectMultiScale(ventralImg_gray, 1.1, 9)
-
-    if len(faces_rect) > 0:
-        print("----------------FACES DETECTED----------------")
-        for x, y, w, h in faces_rect:
-            print("Face detected! (pos: {drone_position}); imCoords: {(x,y)}")
-            cv2.rectangle(ventralImg, (x, y), (x + w, y + h), (0, 255, 0), thickness=2)
+    if len(faces_list) > 0:
+        print("detected faces")
 
     GUI.showImage(Drone.get_frontal_image())
     GUI.showLeftImage(ventralImg)
-    Drone.set_cmd_pos(desiredPosition[0], desiredPosition[1], 5, 0.9)
