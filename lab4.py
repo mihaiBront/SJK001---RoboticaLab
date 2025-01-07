@@ -6,10 +6,43 @@ import numpy as np
 import cv2
 import random
 
-DEBUG = False
+DEBUG = False  # variable for activating extra prints for debug
+
+"""
+This problem can be solved more simplistically by implementing a simple state machine defined
+by the following grafcet (starting from the moment after the takeoff is performed):
+
+       +-----+
+       |+---+|  ACTION:
+       || 0 ||  Initial state: Go towards the victims position
+       |+---+|
+       +-----+
+          |     TRANSITION:
+        --+---> Distance to the victims < Threshold (arbitrary one; when close to victims)
+          |
+        +---+   ACTION
+        | 1 |   Freeroam around the reported victims position
+        +---+
+          |     TRANSITION:
+        --+---> Found Victims == Expected Victims (6, in this case)
+          |
+        +---+   ACTION:
+        | 2 |   Return to the boat (I assume there will be someone there
+        +---+   waiting for the drone and will catch it mid flight, no landing
+                required)
+"""
 
 
+# region MISC METHODS
 def geoToCartesian(geo):
+    """Method for converting from the boat geodesic coordinates to the dron-relative position
+
+    Args:
+        geo (list[float]): Geodesic coordinates
+
+    Returns:
+        list[float]: Drone coordinates
+    """
     if DEBUG:
         print("geoToCartesian")
 
@@ -23,9 +56,35 @@ def geoToCartesian(geo):
     return np.array(list(utm.from_latlon(_cart[0], _cart[1]))[0:2])
 
 
-# ------------------------------------------
-#    VARIABLES AND INITIAL DECLARATIONS
-# ------------------------------------------
+def spiral_patrol(center, num_loops, radius_increment, num_points_per_loop=100):
+    """
+    Generates a spiral patrol path around a point.
+
+    Parameters:
+        center (tuple): Target position (x, y).
+        num_loops (int): Number of loops in the spiral.
+        radius_increment (float): Increase in radius per loop.
+        num_points_per_loop (int): Number of points per loop.
+
+    Returns:
+        list: List of (x, y) points representing the patrol path.
+    """
+    x_c, y_c = center
+    points = []
+    theta = 0
+    for _ in range(num_loops):
+        for i in range(num_points_per_loop):
+            r = radius_increment * theta / (2 * np.pi)
+            x = x_c + r * np.cos(theta)
+            y = y_c + r * np.sin(theta)
+            points.append((x, y))
+            theta += 2 * np.pi / num_points_per_loop
+    return points
+
+
+# endregion
+
+# region BASELINE VARIABLES AND OBJECTS INITIALIZATION
 
 haar_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
@@ -38,197 +97,141 @@ VICTIMS_COUNT = 6
 DRONE_HEIGHT = 2
 
 # known safety boat location, stored as DEG,MIN,SEC
-BOAT_GEO_LAT_LONG = np.array([[40, 16, 48.2], [-3, -49, -03.5]])
-SURVIVORS_GEO_LAT_LONG = np.array([[40, 16, 47.23], [-3, -49, -01.78]])
+_boat_geo_latLong = np.array([[40, 16, 48.2], [-3, -49, -03.5]])
+_survivors_geo_latLong = np.array([[40, 16, 47.23], [-3, -49, -01.78]])
 
+_boat_geo_cartesian = geoToCartesian(_boat_geo_latLong)
+_survivors_geo_cartesian = geoToCartesian(_survivors_geo_latLong)
 
-BOAT_GEO_CART = geoToCartesian(BOAT_GEO_LAT_LONG)
-SURVIVORS_GEO_CART = geoToCartesian(SURVIVORS_GEO_LAT_LONG)
-
-SURVIVORS_FROM_DRONE = SURVIVORS_GEO_CART - BOAT_GEO_CART
+# variables for navigation
+SURVIVORS_FROM_DRONE = (_survivors_geo_cartesian - _boat_geo_cartesian)[:2]
 
 if DEBUG:
-    SURVIVORS_FROM_DRONE = np.array([5.0, 5.0])
-
-current_pos = Drone.get_position()
-
-print(f"current_pos = {current_pos}, survivors from here = {SURVIVORS_FROM_DRONE}")
-
-# variables for free_roam
+    SURVIVORS_FROM_DRONE = np.array([5, 5])
 
 FREEROAM_SET_POINT_POSITION = SURVIVORS_FROM_DRONE
+BOAT_POSITION = np.array([0, 0])
 
-# ------------------
-#    FUNCTIONS
-# ------------------
+# patrolling pattern for the drone when freeroaming around the victims position
+PATROL_PATTERN = spiral_patrol(
+    SURVIVORS_FROM_DRONE, num_loops=10, radius_increment=2, num_points_per_loop=6
+)
+PATROL_PATTERN_INDEX = 0
+
+# states machine definition
+#               TO-VICTIMS  FREEROAM  BACK TO BOAT
+STATEMACHINE = [True, False, False]  # initialize it as
+TO_VICTIMS = 0
+FREEROAM = 1
+BACK_TO_BOAT = 2
+
+# takeoff drone
+Drone.takeoff(DRONE_HEIGHT)
+
+# initialize a list to store faces
+list_faces = []
+
+# endregion
 
 
-def rotate_image(image, angle):
-    if DEBUG:
-        print("rotate_image")
-
+def _rotate_image(image, angle):
     if angle == 0:
         return image
 
     height, width = image.shape[:2]
-    rot_mat = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 0.9)
+    rot_mat = cv2.getRotationMatrix2D((width / 2, height / 2), angle, 1)
     result = cv2.warpAffine(image, rot_mat, (width, height), flags=cv2.INTER_LINEAR)
     return result
 
 
 def detect_faces(image_gray):
-    if DEBUG:
-        print("detect_faces")
-
-    faces_rect = []
-
-    for angle in np.linspace(0, 360, 5):
-        image_rot = rotate_image(image_gray, angle)
+    for angle in range(0, 360, 10):
+        image_rot = _rotate_image(image_gray, angle)
 
         faces_rect = haar_cascade.detectMultiScale(
             image_rot, scaleFactor=1.1, minNeighbors=4
         )
 
         if len(faces_rect) > 0:
-            print("\t det face...")
-            return faces_rect
+            return True
 
-    return []
-
-
-def store_faces(
-    list_faces_position: list,
-    new_face_position: list[float],
-    minimum_face_separation_m: float,
-):
-    if len(list_faces_position) == 0:
-        return [new_face_position]
-
-    new_list = list_faces_position.copy()
-
-    for face_position in list_faces_position:
-        distance_known_face = new_face_position - face_position
-        distance_known_face = np.sqrt(np.sum(distance_known_face**2))
-
-        if distance_known_face < minimum_face_separation_m:
-            return new_list
-
-    new_list.append(new_face_position)
-    return new_list
+    return False
 
 
-def random_point_in_circle(radius, centroid, current_position):
-    if DEBUG:
-        pass
+def updateFaces(image_gray, drone_position, lst):
+    new_lst = lst.copy()
 
-    distance_to_random_point = 0
-    point = np.array([0, 0])
+    if not detect_faces(image_gray):
+        return new_lst
 
-    while distance_to_random_point < radius / 2:
+    if len(new_lst) > 0:
+        for face_pos in new_lst:
+            if np.linalg.norm(drone_position - face_pos) < 3.5:
+                return new_lst
 
-        # calculating coordinates
-        point = np.array(
-            [
-                np.random.uniform(-radius, radius) + centroid[0],
-                np.random.uniform(-radius, radius) + centroid[1],
-            ]
-        )
-
-        distance_to_random_point = current_position - point
-        distance_to_random_point = np.sqrt(np.sum(distance_to_random_point**2))
-        print(f"calc_dist = {distance_to_random_point} ({point})")
-
-    return point
+    new_lst.append(np.array(drone_position))
+    print(f"New face detected {new_lst}")
+    return new_lst
 
 
-def navigation(
-    current_position,
-    setpoint_position,
-    freeroam_radius,
-    freeroam_centroid,
-    list_detected_faces,
-):
-
-    # calculate distance to survivors position
-    distance_to_position = setpoint_position - current_position
-    distance_to_position = np.sqrt(np.sum(distance_to_position**2))
-
-    if len(list_detected_faces) > VICTIMS_COUNT:
-        Drone.set_cmd_pos(
-            0.0,
-            0.0,
-            DRONE_HEIGHT,
-            0.6,
-        )
-        return freeroam_centroid
-
-    if distance_to_position > freeroam_radius * 1.2:
-        if DEBUG:
-            print("target: survivors")
-
-        # navigate towards survivors position
-        Drone.set_cmd_pos(setpoint_position[0], setpoint_position[1], DRONE_HEIGHT, 0.6)
-        freeroam_centroid = setpoint_position
-
-    else:
-        # freeroam in a circle around the survivors position
-
-        # calculate distance from drone to position
-        distance_to_freeroam_center = freeroam_centroid - current_position
-        distance_to_freeroam_center = np.sqrt(np.sum(distance_to_freeroam_center**2))
-
-        if DEBUG:
-            pass
-        # if close to randomly selected point
-        if distance_to_freeroam_center < 0.09:  # meters
-            print(
-                f"OLD FREEROAM DESTINATION {freeroam_centroid} {distance_to_freeroam_center}m away"
-            )
-            freeroam_centroid = random_point_in_circle(
-                freeroam_radius, setpoint_position, current_position
-            )
-            print(f"NEW FREEROAM DESTINATION {freeroam_centroid}")
-
-        Drone.set_cmd_pos(
-            freeroam_centroid[0],
-            freeroam_centroid[1],
-            DRONE_HEIGHT,
-            0.6,
-        )
-
-    return freeroam_centroid
+def freeroamTarget(drone_position, patrol_pattern, patrol_pattern_index):
+    if np.linalg.norm(drone_position - patrol_pattern[patrol_pattern_index]) < 0.4:
+        patrol_pattern_index += 1
+        print(f"\t Freeroaming to next path step ({patrol_pattern_index})")
+        if patrol_pattern_index >= len(patrol_pattern) - 1:
+            patrol_pattern_index = 0
+    return patrol_pattern_index
 
 
-# -------------------
-#    SETUP CODE
-# -------------------
-
-Drone.takeoff(DRONE_HEIGHT)
-
-list_faces = []
-
+# ----------------------------- MAIN LOOP -----------------------------------
+print(f"1: TRAVEL TO REPORTED VICTIMS POSITION ({SURVIVORS_FROM_DRONE})")
 while True:
-    drone_position = np.array(Drone.get_position())
-
-    FREEROAM_SET_POINT_POSITION = navigation(
-        drone_position[:2],
-        SURVIVORS_FROM_DRONE,
-        5,
-        FREEROAM_SET_POINT_POSITION,
-        list_faces,
-    )
-
+    # 1. sensoric update
+    drone_position = np.array(Drone.get_position())[:2]
     ventralImg = cv2.cvtColor(Drone.get_ventral_image(), cv2.COLOR_BGR2GRAY)
 
-    distance_to_survivors = drone_position[:2] - SURVIVORS_FROM_DRONE[:2]
-    distance_to_survivors = np.sqrt(np.sum(distance_to_survivors**2))
+    # 2. Transitions calculation
+    if (
+        STATEMACHINE[TO_VICTIMS]
+        and np.linalg.norm(drone_position - SURVIVORS_FROM_DRONE) < 1
+    ):
+        print("2: FREEROAMING AROUND VICTIMS")
+        # if drone is going towards victims and it is close enough to them, go to freeroam
+        STATEMACHINE = [False, True, False]
+    elif STATEMACHINE[FREEROAM] and len(list_faces) >= VICTIMS_COUNT:
+        print("3. RETURNING TO BOAT")
+        # if drone is in freeroam and it has found enough victims, go back to boat
+        STATEMACHINE = [False, False, True]
 
-    if distance_to_survivors < 12:
-        faces_list = detect_faces(ventralImg)
+    # 3. Actions calculation
+    if STATEMACHINE[TO_VICTIMS]:
+        Drone.set_cmd_pos(
+            SURVIVORS_FROM_DRONE[0],
+            SURVIVORS_FROM_DRONE[1],
+            DRONE_HEIGHT,
+            0.6,
+        )
+    elif STATEMACHINE[FREEROAM]:
+        # try and find faces
+        list_faces = updateFaces(ventralImg, drone_position, list_faces)
 
-        if len(faces_list) > 0:
-            list_faces = store_faces(list_faces, drone_position[:2], 3.0)
-            print(f"detected {len(faces_list)} faces; current list is {list_faces}")
+        # update freeroam position
+        PATROL_PATTERN_INDEX = freeroamTarget(
+            drone_position=drone_position,
+            patrol_pattern=PATROL_PATTERN,
+            patrol_pattern_index=PATROL_PATTERN_INDEX,
+        )
+        FREEROAM_SET_POINT_POSITION = PATROL_PATTERN[PATROL_PATTERN_INDEX]
 
+        Drone.set_cmd_pos(
+            FREEROAM_SET_POINT_POSITION[0],
+            FREEROAM_SET_POINT_POSITION[1],
+            DRONE_HEIGHT,
+            0.6,
+        )
+    elif STATEMACHINE[BACK_TO_BOAT]:
+        Drone.set_cmd_pos(BOAT_POSITION[0], BOAT_POSITION[1], DRONE_HEIGHT, 0.6)
+
+    # 4. Other outputs
     GUI.showImage(Drone.get_frontal_image())
     GUI.showLeftImage(ventralImg)
